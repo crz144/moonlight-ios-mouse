@@ -71,7 +71,7 @@ static const int MoonlightWheelDelta = 120;
 // Raw HID pointer deltas use a bottom-left origin (+Y up), so invert Y to match
 // the host's top-left origin. Change this to 1.0 if vertical mouse movement
 // comes out inverted on your device.
-static const double MoonlightHIDMouseYSign = -1.0;
+static const double MoonlightHIDMouseYSign = 1.0;
 
 @interface ControllerSupport ()
 - (void)startHIDMouseSupport;
