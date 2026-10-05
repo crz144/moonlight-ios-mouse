@@ -1,0 +1,216 @@
+name: Build tvOS IPA
+
+# Produces a sideloadable .ipa for Apple TV.
+#
+# The "unsigned-ipa" job needs NO secrets and works on the free tier: download
+# the artifact and let Sideloadly / AltStore sign it on your own PC.
+#
+# The "signed-ipa" job is optional. It only runs when the signing secrets below
+# are configured. Those secrets require a development certificate + provisioning
+# profile, which the Apple Developer *free* tier cannot generate outside of Xcode.
+#
+#   SIGNING_CERT_BASE64               base64 of a .p12 (Apple Development cert)
+#   SIGNING_CERT_PASSWORD             password protecting the .p12
+#   PROVISIONING_PROFILE_BASE64       base64 of a .mobileprovision
+#   PROVISIONING_PROFILE_SPECIFIER    the profile's name (Xcode "Specifier")
+#   TEAM_ID                           your 10-character Apple Developer Team ID
+#   BUNDLE_ID                         a bundle id unique to you, e.g. com.yourname.Moonlight
+#   EXPORT_METHOD                     development (default) or ad-hoc
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The `secrets` context is not available in a job-level `if`, so probe for the
+  # signing secrets in a tiny job and expose the result as an output instead.
+  detect-signing:
+    name: Detect signing secrets
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          CERT: ${{ secrets.SIGNING_CERT_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+          PROFILE: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+          PROFILE_SPECIFIER: ${{ secrets.PROVISIONING_PROFILE_SPECIFIER }}
+          TEAM: ${{ secrets.TEAM_ID }}
+          BUNDLE: ${{ secrets.BUNDLE_ID }}
+        run: |
+          if [ -n "$CERT" ] && [ -n "$CERT_PASSWORD" ] && [ -n "$PROFILE" ] \
+             && [ -n "$PROFILE_SPECIFIER" ] && [ -n "$TEAM" ] && [ -n "$BUNDLE" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  unsigned-ipa:
+    name: Build unsigned tvOS IPA
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Ensure tvOS platform is installed
+        run: xcodebuild -downloadPlatform tvOS || true
+
+      - name: Build unsigned archive
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Moonlight.xcodeproj \
+            -scheme "Moonlight TV" \
+            -configuration Release \
+            -sdk appletvos \
+            -destination 'generic/platform=tvOS' \
+            -archivePath "$RUNNER_TEMP/MoonlightTV.xcarchive" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/MoonlightTV.xcarchive/Products/Applications" -maxdepth 1 -name '*.app' | head -n1)"
+          if [ -z "$APP" ]; then
+            echo "No .app found in archive" >&2
+            exit 1
+          fi
+          echo "Packaging: $APP"
+          rm -rf "$RUNNER_TEMP/Payload"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          zip -qry MoonlightTV-unsigned.ipa Payload
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoonlightTV-unsigned-ipa
+          path: ${{ runner.temp }}/MoonlightTV-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+  signed-ipa:
+    name: Build signed tvOS IPA
+    runs-on: macos-latest
+    needs: [unsigned-ipa, detect-signing]
+    if: needs.detect-signing.outputs.enabled == 'true'
+    env:
+      SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
+      SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+      PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+      PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.PROVISIONING_PROFILE_SPECIFIER }}
+      TEAM_ID: ${{ secrets.TEAM_ID }}
+      BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+      EXPORT_METHOD: ${{ secrets.EXPORT_METHOD || 'development' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Ensure tvOS platform is installed
+        run: xcodebuild -downloadPlatform tvOS || true
+
+      - name: Import signing certificate and provisioning profile
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          echo "$SIGNING_CERT_BASE64" | base64 -D > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$SIGNING_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN"
+
+          PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PP_DIR"
+          echo "$PROVISIONING_PROFILE_BASE64" | base64 -D > "$RUNNER_TEMP/profile.mobileprovision"
+          cp "$RUNNER_TEMP/profile.mobileprovision" "$PP_DIR/"
+
+      - name: Build signed archive
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Moonlight.xcodeproj \
+            -scheme "Moonlight TV" \
+            -configuration Release \
+            -sdk appletvos \
+            -destination 'generic/platform=tvOS' \
+            -archivePath "$RUNNER_TEMP/MoonlightTV.xcarchive" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Development" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_SPECIFIER" \
+            archive
+
+      - name: Export signed IPA
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>${EXPORT_METHOD}</string>
+            <key>teamID</key>
+            <string>${TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>compileBitcode</key>
+            <false/>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key>
+              <string>${PROVISIONING_PROFILE_SPECIFIER}</string>
+            </dict>
+          </dict>
+          </plist>
+          PLIST
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/MoonlightTV.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+
+          cd "$RUNNER_TEMP/export"
+          IPA="$(find . -maxdepth 1 -name '*.ipa' | head -n1)"
+          cp "$IPA" "$RUNNER_TEMP/MoonlightTV-signed.ipa"
+
+      - name: Upload signed IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoonlightTV-signed-ipa
+          path: ${{ runner.temp }}/MoonlightTV-signed.ipa
+          if-no-files-found: error
+          retention-days: 30
