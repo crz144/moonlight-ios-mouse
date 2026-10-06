@@ -44,6 +44,13 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     BOOL hasUserInteracted;
     
     NSDictionary<NSString *, NSNumber *> *dictCodes;
+    
+    // Ctrl+Shift+E -> synthetic Escape chord tracking
+    BOOL ctrlKeyDown;
+    BOOL shiftKeyDown;
+    BOOL escapeChordActive;
+    short ctrlKeyCode;
+    short shiftKeyCode;
 }
 
 - (void) setupStreamView:(ControllerSupport*)controllerSupport
@@ -552,6 +559,32 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
     if (@available(iOS 13.4, tvOS 13.4, *)) {
         for (UIPress* press in presses) {
+            UIKey* key = press.key;
+            
+            // UIKeyCommand delivery is unreliable on tvOS, so track the physical
+            // modifier state and detect the Ctrl+Shift+E chord here as well.
+            if (key.keyCode == UIKeyboardHIDUsageKeyboardLeftControl) {
+                ctrlKeyDown = YES;
+                ctrlKeyCode = 0xA2; // VK_LCONTROL
+            }
+            else if (key.keyCode == UIKeyboardHIDUsageKeyboardRightControl) {
+                ctrlKeyDown = YES;
+                ctrlKeyCode = 0xA3; // VK_RCONTROL
+            }
+            else if (key.keyCode == UIKeyboardHIDUsageKeyboardLeftShift) {
+                shiftKeyDown = YES;
+                shiftKeyCode = 0xA0; // VK_LSHIFT
+            }
+            else if (key.keyCode == UIKeyboardHIDUsageKeyboardRightShift) {
+                shiftKeyDown = YES;
+                shiftKeyCode = 0xA1; // VK_RSHIFT
+            }
+            
+            if ([self handleEscapeChordKey:key down:YES]) {
+                handled = YES;
+                continue;
+            }
+            
             // For now, we'll treated it as handled if we handle at least one of the
             // UIPress events inside the set.
             if ([KeyboardSupport sendKeyEventForPress:press down:YES]) {
@@ -571,6 +604,22 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
     if (@available(iOS 13.4, tvOS 13.4, *)) {
         for (UIPress* press in presses) {
+            UIKey* key = press.key;
+            
+            if (key.keyCode == UIKeyboardHIDUsageKeyboardLeftControl ||
+                key.keyCode == UIKeyboardHIDUsageKeyboardRightControl) {
+                ctrlKeyDown = NO;
+            }
+            else if (key.keyCode == UIKeyboardHIDUsageKeyboardLeftShift ||
+                     key.keyCode == UIKeyboardHIDUsageKeyboardRightShift) {
+                shiftKeyDown = NO;
+            }
+            
+            if ([self handleEscapeChordKey:key down:NO]) {
+                handled = YES;
+                continue;
+            }
+            
             // For now, we'll treated it as handled if we handle at least one of the
             // UIPress events inside the set.
             if ([KeyboardSupport sendKeyEventForPress:press down:NO]) {
@@ -838,14 +887,61 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     [self sendLowLevelEvent:event];
 }
 
-- (void)escapeKeyPressed:(UIKeyCommand *)cmd {
-    // tvOS consumes the physical Escape/Menu key for system navigation before it
-    // can reach StreamView, so the real VK_ESCAPE (0x1B) never makes it to the
-    // host. Expose the system-safe Ctrl+Shift+E chord as a synthetic Escape.
+- (BOOL)handleEscapeChordKey:(UIKey *)key down:(BOOL)down API_AVAILABLE(ios(13.4), tvos(13.4)) {
+    if (key == nil || key.keyCode != UIKeyboardHIDUsageKeyboardE) {
+        return NO;
+    }
+    
+    if (down) {
+        BOOL ctrl = (key.modifierFlags & UIKeyModifierControl) != 0 || ctrlKeyDown;
+        BOOL shift = (key.modifierFlags & UIKeyModifierShift) != 0 || shiftKeyDown;
+        if (!ctrl || !shift) {
+            return NO;
+        }
+        
+        // Consume the chord and emit a synthetic Escape instead of 'E'.
+        escapeChordActive = YES;
+        [self escapeKeyPressed:nil];
+        return YES;
+    }
+    else if (escapeChordActive) {
+        // Swallow the key-up for the 'E' we already consumed.
+        escapeChordActive = NO;
+        return YES;
+    }
+    
+    return NO;
+}
+
+- (void)escapeKeyPressed:(id)sender {
+    // tvOS intercepts the physical Escape/Menu key for system navigation before
+    // it can reach StreamView, so the real VK_ESCAPE (0x1B) never makes it to
+    // the host. Emit a synthetic Escape for the Ctrl+Shift+E chord instead.
+    //
+    // The Ctrl/Shift key-downs were already forwarded as their own key events,
+    // so release them first. Otherwise the host would see Ctrl+Shift+Esc, which
+    // Windows treats as the Task Manager shortcut.
+    short ctrl = ctrlKeyDown ? ctrlKeyCode : 0;
+    short shift = shiftKeyDown ? shiftKeyCode : 0;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        if (ctrl != 0) {
+            LiSendKeyboardEvent((short)(0x8000 | ctrl), KEY_ACTION_UP, MODIFIER_CTRL);
+        }
+        if (shift != 0) {
+            LiSendKeyboardEvent((short)(0x8000 | shift), KEY_ACTION_UP, MODIFIER_SHIFT);
+        }
+        
         LiSendKeyboardEvent(0x8000 | 0x1B, KEY_ACTION_DOWN, 0);
         usleep(50 * 1000);
         LiSendKeyboardEvent(0x8000 | 0x1B, KEY_ACTION_UP, 0);
+        
+        // Restore the modifiers the user is still physically holding.
+        if (shift != 0) {
+            LiSendKeyboardEvent((short)(0x8000 | shift), KEY_ACTION_DOWN, MODIFIER_SHIFT);
+        }
+        if (ctrl != 0) {
+            LiSendKeyboardEvent((short)(0x8000 | ctrl), KEY_ACTION_DOWN, MODIFIER_CTRL);
+        }
     });
 }
 
@@ -875,6 +971,12 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     NSString *charset = @"qwertyuiopasdfghjklzxcvbnm1234567890\t§[]\\'\"/.,`<>-´ç+`¡'º;ñ= ";
     
     NSMutableArray<UIKeyCommand *> * commands = [NSMutableArray<UIKeyCommand *> array];
+    
+    // Ctrl+Shift+E emits a synthetic Escape. Registered first so it takes
+    // precedence over the generic per-character modifier commands below.
+    [commands addObject:[UIKeyCommand keyCommandWithInput:@"e"
+                                            modifierFlags:UIKeyModifierControl | UIKeyModifierShift
+                                                   action:@selector(escapeKeyPressed:)]];
     dictCodes = [[NSDictionary alloc] initWithObjectsAndKeys: [NSNumber numberWithInt: 0x0d], @"\r", [NSNumber numberWithInt: 0x08], @"\b", [NSNumber numberWithInt: 0x1b], UIKeyInputEscape, [NSNumber numberWithInt: 0x28], UIKeyInputDownArrow, [NSNumber numberWithInt: 0x26], UIKeyInputUpArrow, [NSNumber numberWithInt: 0x25], UIKeyInputLeftArrow, [NSNumber numberWithInt: 0x27], UIKeyInputRightArrow, nil];
     
     [charset enumerateSubstringsInRange:NSMakeRange(0, charset.length)
@@ -885,12 +987,6 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
                                  [commands addObject:[UIKeyCommand keyCommandWithInput:substring modifierFlags:UIKeyModifierControl action:@selector(keyPressed:)]];
                                  [commands addObject:[UIKeyCommand keyCommandWithInput:substring modifierFlags:UIKeyModifierAlternate action:@selector(keyPressed:)]];
                              }];
-    
-    // Ctrl+Shift+E emits a synthetic Escape. tvOS eats the real Escape/Menu key
-    // for system navigation, so this chord gives games a rebind-proof Escape.
-    [commands addObject:[UIKeyCommand keyCommandWithInput:@"e"
-                                            modifierFlags:UIKeyModifierControl | UIKeyModifierShift
-                                                   action:@selector(escapeKeyPressed:)]];
     
     for (NSString *c in [dictCodes keyEnumerator]) {
         [commands addObject:[UIKeyCommand keyCommandWithInput:c
