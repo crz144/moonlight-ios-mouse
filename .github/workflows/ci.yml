@@ -39,7 +39,7 @@ jobs:
         run: xcodebuild -downloadPlatform ${{ matrix.platform }}
 
       - name: Build Debug
-        run: xcodebuild -project Moonlight.xcodeproj -scheme "${{ matrix.scheme }}" -configuration Debug -sdk ${{ matrix.sdk }} clean build
+        run: xcodebuild -project Moonlight.xcodeproj -scheme "${{ matrix.scheme }}" -configuration Debug -sdk ${{ matrix.sdk }} 'GCC_PREPROCESSOR_DEFINITIONS=$(inherited) MOONLIGHT_ENABLE_TVOS_HID_KEYBOARD=1' clean build
 
       - name: Build Release
-        run: xcodebuild -project Moonlight.xcodeproj -scheme "${{ matrix.scheme }}" -configuration Release -sdk ${{ matrix.sdk }} clean build
+        run: xcodebuild -project Moonlight.xcodeproj -scheme "${{ matrix.scheme }}" -configuration Release -sdk ${{ matrix.sdk }} 'GCC_PREPROCESSOR_DEFINITIONS=$(inherited) MOONLIGHT_ENABLE_TVOS_HID_KEYBOARD=1' clean build

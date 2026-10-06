@@ -18,7 +18,7 @@
 @import AudioToolbox;
 
 // ---------------------------------------------------------------------------
-// tvOS raw-HID mouse shim
+// tvOS raw-HID input shim
 //
 // On tvOS, GameController never receives mouse HID events. UIKit's internal
 // filter (the one that feeds GCMouseInput via
@@ -31,11 +31,30 @@
 // shim taps that stream and translates pointer/scroll/button events into the
 // LiSendMouse* APIs.
 //
+// The same stream also exposes raw keyboard events. tvOS consumes the physical
+// Escape/Menu key for system navigation before it reaches StreamView, so this
+// shim can observe the Escape HID usage and forward VK_ESCAPE to the host. Only
+// Escape is forwarded; every other key still flows through StreamView's normal
+// UIPress/keyCommands path.
+//
 // WARNING: This relies on private API and is therefore not App Store safe.
-// Define MOONLIGHT_DISABLE_TVOS_HID_MOUSE to compile it out.
+// Define MOONLIGHT_DISABLE_TVOS_HID_MOUSE to compile mouse support out.
+// Define MOONLIGHT_ENABLE_TVOS_HID_KEYBOARD to opt in to keyboard support.
 // ---------------------------------------------------------------------------
 #if TARGET_OS_TV && !defined(MOONLIGHT_DISABLE_TVOS_HID_MOUSE)
 #define MOONLIGHT_TVOS_HID_MOUSE 1
+#else
+#define MOONLIGHT_TVOS_HID_MOUSE 0
+#endif
+
+#if TARGET_OS_TV && defined(MOONLIGHT_ENABLE_TVOS_HID_KEYBOARD)
+#define MOONLIGHT_TVOS_HID_KEYBOARD 1
+#else
+#define MOONLIGHT_TVOS_HID_KEYBOARD 0
+#endif
+
+#if MOONLIGHT_TVOS_HID_MOUSE || MOONLIGHT_TVOS_HID_KEYBOARD
+#define MOONLIGHT_TVOS_HID 1
 
 #import <dlfcn.h>
 #import <objc/message.h>
@@ -52,6 +71,7 @@ typedef void (*MoonlightHIDObserverSetter)(id, SEL, id, dispatch_queue_t);
 // IOHIDEventTypes.h and IOHIDEventFieldDefs.h. A field is encoded as
 // (eventType << 16) | fieldIndex.
 #define MOONLIGHT_IOHID_FIELD_BASE(type) ((uint32_t)((type) << 16))
+#if MOONLIGHT_TVOS_HID_MOUSE
 static const uint32_t MoonlightIOHIDEventTypeButton  = 2;
 static const uint32_t MoonlightIOHIDEventTypeScroll  = 6;
 static const uint32_t MoonlightIOHIDEventTypePointer = 17;
@@ -64,7 +84,20 @@ static const uint32_t MoonlightIOHIDFieldScrollIsPixels    = MOONLIGHT_IOHID_FIE
 static const uint32_t MoonlightIOHIDFieldButtonMask        = MOONLIGHT_IOHID_FIELD_BASE(2) | 0;
 static const uint32_t MoonlightIOHIDFieldButtonNumber      = MOONLIGHT_IOHID_FIELD_BASE(2) | 1;
 static const uint32_t MoonlightIOHIDFieldButtonState       = MOONLIGHT_IOHID_FIELD_BASE(2) | 4;
+#endif
 
+#if MOONLIGHT_TVOS_HID_KEYBOARD
+static const uint32_t MoonlightIOHIDEventTypeKeyboard  = 3;
+static const uint32_t MoonlightIOHIDFieldKeyboardUsagePage = MOONLIGHT_IOHID_FIELD_BASE(3) | 0;
+static const uint32_t MoonlightIOHIDFieldKeyboardUsage     = MOONLIGHT_IOHID_FIELD_BASE(3) | 1;
+static const uint32_t MoonlightIOHIDFieldKeyboardDown      = MOONLIGHT_IOHID_FIELD_BASE(3) | 2;
+
+// USB HID Usage Tables page 0x07 (Keyboard/Keypad), usage 0x29 (Escape).
+static const int64_t MoonlightHIDKeyboardUsagePage   = 0x07;
+static const int64_t MoonlightHIDKeyboardEscapeUsage = 0x29;
+#endif
+
+#if MOONLIGHT_TVOS_HID_MOUSE
 // Standard Windows wheel delta used by the Moonlight protocol (120 == 1 notch).
 static const int MoonlightWheelDelta = 120;
 
@@ -72,17 +105,24 @@ static const int MoonlightWheelDelta = 120;
 // the host's top-left origin. Change this to 1.0 if vertical mouse movement
 // comes out inverted on your device.
 static const double MoonlightHIDMouseYSign = 1.0;
+#endif
 
 @interface ControllerSupport ()
-- (void)startHIDMouseSupport;
-- (void)stopHIDMouseSupport;
+- (void)startHIDSupport;
+- (void)stopHIDSupport;
+- (void)handleHIDEvent:(MoonlightIOHIDEventRef)event;
+#if MOONLIGHT_TVOS_HID_MOUSE
 - (void)handleHIDMouseEvent:(MoonlightIOHIDEventRef)event;
 - (void)handleHIDMouseMoveX:(double)deltaX y:(double)deltaY;
 - (void)handleHIDMouseButtons:(int64_t)buttonMask;
 - (void)handleHIDMouseScrollX:(double)scrollX y:(double)scrollY;
+#endif
+#if MOONLIGHT_TVOS_HID_KEYBOARD
+- (void)handleHIDKeyboardEvent:(MoonlightIOHIDEventRef)event;
+#endif
 @end
 #else
-#define MOONLIGHT_TVOS_HID_MOUSE 0
+#define MOONLIGHT_TVOS_HID 0
 #endif
 
 static const double MOUSE_SPEED_DIVISOR = 1.25;
@@ -115,18 +155,23 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
     bool _multiController;
     bool _swapABXYButtons;
 
-#if MOONLIGHT_TVOS_HID_MOUSE
+#if MOONLIGHT_TVOS_HID
     id _hidEventObserverBlock;
     dispatch_queue_t _hidEventObserverQueue;
     MoonlightIOHIDEventGetTypeFunc _hidEventGetType;
     MoonlightIOHIDEventGetFloatFunc _hidEventGetFloat;
     MoonlightIOHIDEventGetIntegerFunc _hidEventGetInteger;
+#if MOONLIGHT_TVOS_HID_MOUSE
     int32_t _hidLastButtonMask;
     float _hidAccumulatedDeltaX;
     float _hidAccumulatedDeltaY;
     float _hidAccumulatedScrollX;
     float _hidAccumulatedScrollY;
     BOOL _hidLoggedFirstPointerEvent;
+#endif
+#if MOONLIGHT_TVOS_HID_KEYBOARD
+    BOOL _hidLoggedFirstKeyboardEvent;
+#endif
 #endif
 }
 
@@ -971,7 +1016,7 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
     // between discrete and continuous scroll events and also works around a bug
     // in iPadOS 15 where discrete scroll events are dropped. On tvOS these
     // GCMouse handlers never fire because UIKit's HID filter does not forward
-    // mouse events to GameController; the raw-HID shim (startHIDMouseSupport)
+    // mouse events to GameController; the raw-HID shim (startHIDSupport)
     // provides mouse input there instead.
 #if TARGET_OS_TV
     mouse.mouseInput.scroll.xAxis.valueChangedHandler = ^(GCControllerAxisInput * _Nonnull axis, float value) {
@@ -1000,10 +1045,10 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
 #endif
 }
 
-#if MOONLIGHT_TVOS_HID_MOUSE
-#pragma mark - tvOS raw HID mouse shim
+#if MOONLIGHT_TVOS_HID
+#pragma mark - tvOS raw HID input shim
 
-- (void)startHIDMouseSupport {
+- (void)startHIDSupport {
     if (_hidEventObserverBlock != nil) {
         // Already installed
         return;
@@ -1012,7 +1057,7 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
     UIApplication *app = UIApplication.sharedApplication;
     SEL setObserverSel = NSSelectorFromString(@"_setHIDEventObserver:onQueue:");
     if (![app respondsToSelector:setObserverSel]) {
-        Log(LOG_W, @"tvOS HID mouse shim: UIApplication does not respond to _setHIDEventObserver:onQueue:, mouse input unavailable");
+        Log(LOG_W, @"tvOS HID shim: UIApplication does not respond to _setHIDEventObserver:onQueue:, input unavailable");
         return;
     }
     
@@ -1020,33 +1065,38 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
     _hidEventGetFloat = (MoonlightIOHIDEventGetFloatFunc)dlsym(RTLD_DEFAULT, "IOHIDEventGetFloatValue");
     _hidEventGetInteger = (MoonlightIOHIDEventGetIntegerFunc)dlsym(RTLD_DEFAULT, "IOHIDEventGetIntegerValue");
     if (_hidEventGetType == NULL || _hidEventGetFloat == NULL || _hidEventGetInteger == NULL) {
-        Log(LOG_W, @"tvOS HID mouse shim: unable to resolve IOHIDEvent symbols, mouse input unavailable");
+        Log(LOG_W, @"tvOS HID shim: unable to resolve IOHIDEvent symbols, input unavailable");
         return;
     }
     
+#if MOONLIGHT_TVOS_HID_MOUSE
     _hidLastButtonMask = 0;
     _hidAccumulatedDeltaX = 0;
     _hidAccumulatedDeltaY = 0;
     _hidAccumulatedScrollX = 0;
     _hidAccumulatedScrollY = 0;
     _hidLoggedFirstPointerEvent = NO;
+#endif
+#if MOONLIGHT_TVOS_HID_KEYBOARD
+    _hidLoggedFirstKeyboardEvent = NO;
+#endif
     
     __weak ControllerSupport *weakSelf = self;
     void (^observer)(MoonlightIOHIDEventRef) = ^(MoonlightIOHIDEventRef event) {
-        [weakSelf handleHIDMouseEvent:event];
+        [weakSelf handleHIDEvent:event];
     };
     
     // UIKit retains the observer for the lifetime of the application, so keep
     // our own reference to the heap block and clear it in cleanup.
     _hidEventObserverBlock = [observer copy];
-    _hidEventObserverQueue = dispatch_queue_create("com.moonlight.tvoshidmouse", DISPATCH_QUEUE_SERIAL);
+    _hidEventObserverQueue = dispatch_queue_create("com.moonlight.tvoshid", DISPATCH_QUEUE_SERIAL);
     
     ((MoonlightHIDObserverSetter)objc_msgSend)(app, setObserverSel, _hidEventObserverBlock, _hidEventObserverQueue);
     
-    Log(LOG_I, @"tvOS HID mouse shim installed");
+    Log(LOG_I, @"tvOS HID shim installed (mouse=%d keyboard=%d)", MOONLIGHT_TVOS_HID_MOUSE, MOONLIGHT_TVOS_HID_KEYBOARD);
 }
 
-- (void)stopHIDMouseSupport {
+- (void)stopHIDSupport {
     if (_hidEventObserverBlock == nil) {
         return;
     }
@@ -1064,6 +1114,22 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
     _hidEventGetInteger = NULL;
 }
 
+- (void)handleHIDEvent:(MoonlightIOHIDEventRef)event {
+    if (event == NULL || _hidEventGetType == NULL) {
+        return;
+    }
+    
+#if MOONLIGHT_TVOS_HID_MOUSE
+    [self handleHIDMouseEvent:event];
+#endif
+#if MOONLIGHT_TVOS_HID_KEYBOARD
+    if (_hidEventGetType(event) == MoonlightIOHIDEventTypeKeyboard) {
+        [self handleHIDKeyboardEvent:event];
+    }
+#endif
+}
+
+#if MOONLIGHT_TVOS_HID_MOUSE
 - (void)handleHIDMouseEvent:(MoonlightIOHIDEventRef)event {
     if (event == NULL || _hidEventGetType == NULL) {
         return;
@@ -1175,7 +1241,33 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
         }
     }
 }
-#endif
+#endif // MOONLIGHT_TVOS_HID_MOUSE
+
+#if MOONLIGHT_TVOS_HID_KEYBOARD
+- (void)handleHIDKeyboardEvent:(MoonlightIOHIDEventRef)event {
+    if (event == NULL || _hidEventGetInteger == NULL) {
+        return;
+    }
+    
+    int64_t usagePage = _hidEventGetInteger(event, MoonlightIOHIDFieldKeyboardUsagePage);
+    int64_t usage = _hidEventGetInteger(event, MoonlightIOHIDFieldKeyboardUsage);
+    int64_t down = _hidEventGetInteger(event, MoonlightIOHIDFieldKeyboardDown);
+    
+    // Only forward Escape. All other keys already flow through StreamView's
+    // UIPress/keyCommands path, and forwarding them here would duplicate them.
+    if (usagePage != MoonlightHIDKeyboardUsagePage || usage != MoonlightHIDKeyboardEscapeUsage) {
+        return;
+    }
+    
+    if (!_hidLoggedFirstKeyboardEvent) {
+        _hidLoggedFirstKeyboardEvent = YES;
+        Log(LOG_I, @"tvOS HID keyboard shim received Escape (down=%lld)", (long long)down);
+    }
+    
+    LiSendKeyboardEvent(0x8000 | 0x1B, down ? KEY_ACTION_DOWN : KEY_ACTION_UP, 0);
+}
+#endif // MOONLIGHT_TVOS_HID_KEYBOARD
+#endif // MOONLIGHT_TVOS_HID
 
 -(void) updateAutoOnScreenControlMode
 {
@@ -1370,10 +1462,11 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
         }
     }
     
-#if MOONLIGHT_TVOS_HID_MOUSE
-    // GCMouse never receives mouse HID events on tvOS. Tap the raw HID stream
-    // instead so a Bluetooth mouse produces real input on the host.
-    [self startHIDMouseSupport];
+#if MOONLIGHT_TVOS_HID
+    // GCMouse never receives mouse HID events on tvOS, and tvOS swallows the
+    // Escape key before it reaches StreamView. Tap the raw HID stream so both
+    // produce real input on the host.
+    [self startHIDSupport];
 #endif
     
     _controllerConnectObserver = [[NSNotificationCenter defaultCenter] addObserverForName:GCControllerDidConnectNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
@@ -1535,8 +1628,8 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
         }
     }
     
-#if MOONLIGHT_TVOS_HID_MOUSE
-    [self stopHIDMouseSupport];
+#if MOONLIGHT_TVOS_HID
+    [self stopHIDSupport];
 #endif
 }
 

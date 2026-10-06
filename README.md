@@ -1,3 +1,28 @@
+# Intro
+
+This is a simple fork to implement some minor fixes for keyboard + mouse support on Moonlight for TvOS 
+
+The core mouse fix was brought up by bartleman [here:](https://github.com/moonlight-stream/moonlight-ios/pull/676)
+
+This is a private API fix, meaning it would not pass Apple app store review (hence why it is not implemented in the core repo).
+A more comprehensive fix would be for Apple to properly forward mouse input events, at which point app store versions would work properly. 
+You can boost the odds of this by duplicating bartleman's original feedback (ID: FB24369577) at feedback.apple.com
+
+# Deployment
+
+Multiple methods, but the simplest:
+
+- Pre-requisite: The compiled .ipa file will clash with existing Moonlight installations. Delete the existing app on your AppleTV to proceed.
+1. Grab the .ipa file from the artifacts of the most recent run in the "Actions" tab.
+2. Install [Sideloadly](https://sideloadly.io/). Sideloading from Windows is only supported if you have an AppleTV with a USB port, and it must be connected directly to the Windows Machine. If you have an AppleTV model with no USB port, you will need a MacOS computer to proceed.
+3. On your Apple TV, navigate to Settings > Remotes and Devices > Remote App and Devices. Leave the Apple TV open to this screen.
+4. Open Sideloadly, and check that your Apple TV appears in the "iDevice" dropdown.
+5. Enter the email address associated with your Apple ID, click the large "IPA" icon to the left, and select the .ipa file downloaded earlier.
+6. Click "Start" and Sideloadly will begin installing the compiled app to your Apple TV. You will be prompted for a pin from the Apple TV as well as your ICloud account password throughout this process.
+
+Note that if you don't have a paid Apple Developer account, you will need to follow steps 4-6 once a week, as sideloaded apps are only available for 7 days on the Apple developer free tier.
+
+
 # Moonlight iOS/tvOS
 
 [![CI](https://github.com/moonlight-stream/moonlight-ios/actions/workflows/ci.yml/badge.svg)](https://github.com/moonlight-stream/moonlight-ios/actions/workflows/ci.yml)

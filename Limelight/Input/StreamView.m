@@ -838,6 +838,17 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     [self sendLowLevelEvent:event];
 }
 
+- (void)escapeKeyPressed:(UIKeyCommand *)cmd {
+    // tvOS consumes the physical Escape/Menu key for system navigation before it
+    // can reach StreamView, so the real VK_ESCAPE (0x1B) never makes it to the
+    // host. Expose the system-safe Ctrl+Shift+E chord as a synthetic Escape.
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        LiSendKeyboardEvent(0x8000 | 0x1B, KEY_ACTION_DOWN, 0);
+        usleep(50 * 1000);
+        LiSendKeyboardEvent(0x8000 | 0x1B, KEY_ACTION_UP, 0);
+    });
+}
+
 - (void)sendLowLevelEvent:(struct KeyEvent)event {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         // When we want to send a modified key (like uppercase letters) we need to send the
@@ -874,6 +885,12 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
                                  [commands addObject:[UIKeyCommand keyCommandWithInput:substring modifierFlags:UIKeyModifierControl action:@selector(keyPressed:)]];
                                  [commands addObject:[UIKeyCommand keyCommandWithInput:substring modifierFlags:UIKeyModifierAlternate action:@selector(keyPressed:)]];
                              }];
+    
+    // Ctrl+Shift+E emits a synthetic Escape. tvOS eats the real Escape/Menu key
+    // for system navigation, so this chord gives games a rebind-proof Escape.
+    [commands addObject:[UIKeyCommand keyCommandWithInput:@"e"
+                                            modifierFlags:UIKeyModifierControl | UIKeyModifierShift
+                                                   action:@selector(escapeKeyPressed:)]];
     
     for (NSString *c in [dictCodes keyEnumerator]) {
         [commands addObject:[UIKeyCommand keyCommandWithInput:c
