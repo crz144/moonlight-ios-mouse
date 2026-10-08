@@ -37,7 +37,6 @@
     NSTimer *_inactivityTimer;
     NSTimer *_statsUpdateTimer;
     UITapGestureRecognizer *_menuTapGestureRecognizer;
-    UITapGestureRecognizer *_menuDoubleTapGestureRecognizer;
     UITapGestureRecognizer *_playPauseTapGestureRecognizer;
     UITextView *_overlayView;
     UILabel *_stageLabel;
@@ -63,40 +62,14 @@
 }
 
 #if TARGET_OS_TV
-- (void)controllerPauseButtonPressed:(id)sender { }
-- (void)controllerPauseButtonDoublePressed:(id)sender {
-    Log(LOG_I, @"Menu double-pressed -- backing out of stream");
-    [self returnToMainFrame];
-}
-
-// A Bluetooth keyboard's Escape key is delivered as a Menu press, which would
-// otherwise trigger the single/double Menu pause-and-exit gestures. Reject such
-// presses so they fall through to StreamView, which forwards VK_ESCAPE to the
-// host. The Siri Remote Menu button has no `key`, so it is unaffected.
-- (BOOL)isKeyboardEscapePress:(UIPress *)press API_AVAILABLE(tvos(13.4)) {
-    return press.key != nil && press.key.keyCode == UIKeyboardHIDUsageKeyboardEscape;
-}
-
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceivePress:(UIPress *)press {
-    if (@available(tvOS 13.4, *)) {
-        if ([self isKeyboardEscapePress:press]) {
-            return NO;
-        }
-    }
-    return YES;
-}
-
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveEvent:(UIEvent *)event {
-    if (@available(tvOS 13.4, *)) {
-        if ([event isKindOfClass:[UIPressesEvent class]]) {
-            for (UIPress *press in ((UIPressesEvent *)event).allPresses) {
-                if ([self isKeyboardEscapePress:press]) {
-                    return NO;
-                }
-            }
-        }
-    }
-    return YES;
+- (void)controllerPauseButtonPressed:(id)sender {
+    // tvOS surfaces a Bluetooth keyboard's Escape key as a Menu press, and it is
+    // indistinguishable from the Siri Remote Menu button at the UIPress level
+    // (both are UIPressTypeMenu with no associated UIKey). Forward each Menu
+    // press to the host as VK_ESCAPE. The double-tap exit gesture was removed so
+    // Escape can no longer accidentally quit the stream; use the Play/Pause
+    // button (below) to disconnect.
+    [_streamView sendEscapeKey];
 }
 
 - (void)controllerPlayPauseButtonPressed:(id)sender {
@@ -142,26 +115,15 @@
     [_streamView setupStreamView:_controllerSupport interactionDelegate:self config:self.streamConfig];
     
 #if TARGET_OS_TV
-    if (!_menuTapGestureRecognizer || !_menuDoubleTapGestureRecognizer || !_playPauseTapGestureRecognizer) {
+    if (!_menuTapGestureRecognizer || !_playPauseTapGestureRecognizer) {
         _menuTapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllerPauseButtonPressed:)];
         _menuTapGestureRecognizer.allowedPressTypes = @[@(UIPressTypeMenu)];
 
         _playPauseTapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllerPlayPauseButtonPressed:)];
         _playPauseTapGestureRecognizer.allowedPressTypes = @[@(UIPressTypePlayPause)];
-        
-        _menuDoubleTapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllerPauseButtonDoublePressed:)];
-        _menuDoubleTapGestureRecognizer.numberOfTapsRequired = 2;
-        [_menuTapGestureRecognizer requireGestureRecognizerToFail:_menuDoubleTapGestureRecognizer];
-        _menuDoubleTapGestureRecognizer.allowedPressTypes = @[@(UIPressTypeMenu)];
-        
-        // Allow keyboard Escape presses to bypass the Menu gestures (see
-        // gestureRecognizer:shouldReceivePress: above).
-        _menuTapGestureRecognizer.delegate = self;
-        _menuDoubleTapGestureRecognizer.delegate = self;
     }
     
     [self.view addGestureRecognizer:_menuTapGestureRecognizer];
-    [self.view addGestureRecognizer:_menuDoubleTapGestureRecognizer];
     [self.view addGestureRecognizer:_playPauseTapGestureRecognizer];
 
 #else

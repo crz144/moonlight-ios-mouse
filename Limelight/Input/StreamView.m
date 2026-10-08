@@ -945,6 +945,10 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     });
 }
 
+- (void)sendEscapeKey {
+    [self escapeKeyPressed:nil];
+}
+
 - (void)sendLowLevelEvent:(struct KeyEvent)event {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         // When we want to send a modified key (like uppercase letters) we need to send the
