@@ -88,8 +88,8 @@
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveEvent:(UIEvent *)event {
     if (@available(tvOS 13.4, *)) {
-        if (event.type == UIEventTypePresses) {
-            for (UIPress *press in event.allPresses) {
+        if ([event isKindOfClass:[UIPressesEvent class]]) {
+            for (UIPress *press in ((UIPressesEvent *)event).allPresses) {
                 if ([self isKeyboardEscapePress:press]) {
                     return NO;
                 }
